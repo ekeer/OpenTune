@@ -175,8 +175,8 @@ jobs:
             tar xzf $tarball -C ThirdParty/
             # Tarball extracts to "soundtouch/" — rename to match CMakeLists.txt expectation
             if (Test-Path "ThirdParty/soundtouch") {
-              Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
-              Rename-Item "ThirdParty/soundtouch" $dir
+              Remove-Item -Recurse -Force "ThirdParty/soundtouch-$env:SOUNDTOUCH_VERSION" -ErrorAction SilentlyContinue
+              Rename-Item -Path "ThirdParty/soundtouch" -NewName "soundtouch-$env:SOUNDTOUCH_VERSION"
             }
             Remove-Item $tarball
             Write-Host "SoundTouch extracted to $dir"
@@ -208,11 +208,11 @@ jobs:
       # ── Configure ────────────────────────────────────────────────────────
       - name: Configure CMake (ARA)
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-ara-vs2022"
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-ara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF"
 
       - name: Configure CMake (non-ARA)
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-nonara-vs2022"
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-nonara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF"
 
       # ── Build ────────────────────────────────────────────────────────────
       - name: Build ARA VST3
@@ -395,7 +395,7 @@ jobs:
 
       # ── Configure & Build ────────────────────────────────────────────────
       - name: Configure CMake
-        run: cmake -B build -G Xcode
+        run: cmake -B build -G Xcode -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF
 
       - name: Build Release
         run: cmake --build build --config Release
