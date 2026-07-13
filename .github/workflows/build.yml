@@ -100,8 +100,9 @@ jobs:
         run: |
           $araDir = "ThirdParty/ARA_SDK-releases-$env:ARA_SDK_VERSION"
           if (-not (Test-Path $araDir)) {
-            git clone --recursive --branch releases/$env:ARA_SDK_VERSION `
-              https://github.com/Celemony/ARA_SDK.git $araDir
+            # releases/2.2.0 tag has outdated ARA_Library submodule lacking
+            # Utilities/ARAChannelFormat.cpp required by JUCE — use main branch
+            git clone --recursive --depth 1 https://github.com/Celemony/ARA_SDK.git $araDir
           }
 
       - name: Download ONNX Runtime CPU
@@ -326,8 +327,9 @@ jobs:
         run: |
           ARA_DIR="ThirdParty/ARA_SDK-releases-${ARA_SDK_VERSION}"
           if [ ! -d "$ARA_DIR" ]; then
-            git clone --recursive --branch "releases/${ARA_SDK_VERSION}" \
-              https://github.com/Celemony/ARA_SDK.git "$ARA_DIR"
+            # releases/2.2.0 tag has outdated ARA_Library submodule lacking
+            # Utilities/ARAChannelFormat.cpp required by JUCE — use main branch
+            git clone --recursive --depth 1 https://github.com/Celemony/ARA_SDK.git "$ARA_DIR"
           fi
 
       - name: Download ONNX Runtime (macOS arm64)
