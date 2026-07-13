@@ -164,9 +164,22 @@ jobs:
             $url = "https://www.surina.net/soundtouch/soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
             Write-Host "Downloading SoundTouch from $url"
             $tarball = "soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
-            Invoke-WebRequest -Uri $url -OutFile $tarball
+            # Use curl.exe with retry (more reliable than Invoke-WebRequest on Windows)
+            curl.exe -sSL --connect-timeout 30 --retry 3 $url -o $tarball
+            if (-not (Test-Path $tarball)) {
+              # Fallback: try GitHub mirror
+              Write-Host "Retrying via GitHub mirror..."
+              $url = "https://github.com/olegantonyan/soundtouch/archive/refs/tags/v$env:SOUNDTOUCH_VERSION.tar.gz"
+              curl.exe -sSL --connect-timeout 30 --retry 3 $url -o $tarball
+            }
             tar xzf $tarball -C ThirdParty/
+            # Tarball extracts to "soundtouch/" — rename to match CMakeLists.txt expectation
+            if (Test-Path "ThirdParty/soundtouch") {
+              Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+              Rename-Item "ThirdParty/soundtouch" $dir
+            }
             Remove-Item $tarball
+            Write-Host "SoundTouch extracted to $dir"
           }
 
       # ── Download AI Models (optional) ────────────────────────────────────
@@ -340,10 +353,21 @@ jobs:
             URL="https://www.surina.net/soundtouch/soundtouch-${SOUNDTOUCH_VERSION}.tar.gz"
             echo "Downloading SoundTouch from $URL"
             TARBALL="soundtouch-${SOUNDTOUCH_VERSION}.tar.gz"
-            curl -LO "$URL"
+            curl -sSL --connect-timeout 30 --retry 3 -o "$TARBALL" "$URL" || {
+              # Fallback: GitHub mirror
+              echo "Retrying via GitHub mirror..."
+              URL="https://github.com/olegantonyan/soundtouch/archive/refs/tags/v${SOUNDTOUCH_VERSION}.tar.gz"
+              curl -sSL --connect-timeout 30 --retry 3 -o "$TARBALL" "$URL"
+            }
             mkdir -p ThirdParty
             tar xzf "$TARBALL" -C ThirdParty/
+            # Tarball extracts to "soundtouch/" — rename to match CMakeLists.txt expectation
+            if [ -d "ThirdParty/soundtouch" ]; then
+              rm -rf "$DIR" 2>/dev/null || true
+              mv "ThirdParty/soundtouch" "$DIR"
+            fi
             rm "$TARBALL"
+            echo "SoundTouch extracted to $DIR"
           fi
 
       # ── Download AI Models (optional) ────────────────────────────────────
