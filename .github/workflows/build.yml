@@ -27,13 +27,15 @@ env:
   ARA_SDK_VERSION: "2.2.0"
   DIRECTML_VERSION: "1.15.4"
   D3D12_VERSION: "1.619.1"
+  SOUNDTOUCH_VERSION: "2.3.3"
 
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
   # Windows Build (VS2022, x64)
   # ──────────────────────────────────────────────────────────────────────────
   build-windows:
-    runs-on: windows-latest
+    # Must use windows-2022 — CMakePresets.json uses "Visual Studio 17 2022" generator
+    runs-on: windows-2022
     defaults:
       run:
         shell: pwsh
@@ -82,7 +84,8 @@ jobs:
             ThirdParty/onnxruntime-dml-*
             ThirdParty/microsoft.ai.directml.*
             ThirdParty/microsoft.direct3d.d3d12.*
-          key: deps-windows-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ env.DIRECTML_VERSION }}-${{ env.D3D12_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
+            ThirdParty/soundtouch-*
+          key: deps-windows-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ env.DIRECTML_VERSION }}-${{ env.D3D12_VERSION }}-${{ env.SOUNDTOUCH_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
 
       # ── Dependencies ─────────────────────────────────────────────────────
       - name: Download JUCE Framework
@@ -152,7 +155,21 @@ jobs:
             Remove-Item "$dir.zip"
           }
 
-      # ── Download AI Models ───────────────────────────────────────────────
+      # SoundTouch Library (WSOLA time-stretch, LGPL-2.1)
+      - name: Download SoundTouch
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $dir = "ThirdParty/soundtouch-$env:SOUNDTOUCH_VERSION"
+          if (-not (Test-Path "$dir/source/SoundTouch/SoundTouch.cpp")) {
+            $url = "https://www.surina.net/soundtouch/soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
+            Write-Host "Downloading SoundTouch from $url"
+            $tarball = "soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
+            Invoke-WebRequest -Uri $url -OutFile $tarball
+            tar xzf $tarball -C ThirdParty/
+            Remove-Item $tarball
+          }
+
+      # ── Download AI Models (optional) ────────────────────────────────────
       - name: Download AI models
         continue-on-error: true
         run: |
@@ -280,7 +297,8 @@ jobs:
             JUCE-master
             ThirdParty/ARA_SDK-releases-*
             ThirdParty/onnxruntime-osx-arm64-*
-          key: deps-macos-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
+            ThirdParty/soundtouch-*
+          key: deps-macos-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ env.SOUNDTOUCH_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
 
       # ── Dependencies ─────────────────────────────────────────────────────
       - name: Download JUCE Framework
@@ -313,7 +331,22 @@ jobs:
             rm "$TARBALL"
           fi
 
-      # ── Download AI Models ───────────────────────────────────────────────
+      # SoundTouch Library (WSOLA time-stretch, LGPL-2.1)
+      - name: Download SoundTouch
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          DIR="ThirdParty/soundtouch-${SOUNDTOUCH_VERSION}"
+          if [ ! -f "$DIR/source/SoundTouch/SoundTouch.cpp" ]; then
+            URL="https://www.surina.net/soundtouch/soundtouch-${SOUNDTOUCH_VERSION}.tar.gz"
+            echo "Downloading SoundTouch from $URL"
+            TARBALL="soundtouch-${SOUNDTOUCH_VERSION}.tar.gz"
+            curl -LO "$URL"
+            mkdir -p ThirdParty
+            tar xzf "$TARBALL" -C ThirdParty/
+            rm "$TARBALL"
+          fi
+
+      # ── Download AI Models (optional) ────────────────────────────────────
       - name: Download AI models
         continue-on-error: true
         shell: bash
