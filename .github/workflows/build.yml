@@ -209,24 +209,24 @@ jobs:
       # ── Configure ────────────────────────────────────────────────────────
       - name: Configure CMake (ARA)
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-ara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF"
+          cmake --preset windows-ara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF
 
       - name: Configure CMake (non-ARA)
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-nonara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF"
+          cmake --preset windows-nonara-vs2022 -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF
 
       # ── Build ────────────────────────────────────────────────────────────
       - name: Build ARA VST3
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-ara-release --target OpenTune_VST3"
+          cmake --build build-ara-overlay-vs18-clean --config Release --target OpenTune_VST3 --parallel
 
       - name: Build ARA Standalone
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-ara-release --target OpenTune_Standalone"
+          cmake --build build-ara-overlay-vs18-clean --config Release --target OpenTune_Standalone --parallel
 
       - name: Build non-ARA VST3
         run: |
-          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-nonara-release --target OpenTune_VST3"
+          cmake --build build-nonara-overlay-vs18-clean --config Release --target OpenTune_VST3 --parallel
 
       # ── Package for Release ──────────────────────────────────────────────
       - name: Package Windows release artifacts
@@ -400,7 +400,7 @@ jobs:
         run: cmake -B build -G Xcode -DOPENTUNE_BUILD_ARCHITECTURE_TESTS=OFF
 
       - name: Build Release
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
       # ── Package for Release ──────────────────────────────────────────────
       - name: Package macOS release artifacts
