@@ -1,0 +1,334 @@
+# ============================================================================
+# OpenTune CI Build Workflow
+# ============================================================================
+# Builds OpenTune on Windows (VS2022 x64) and macOS (Apple Silicon arm64).
+# Handles all third-party dependencies with caching for fast rebuilds.
+# ============================================================================
+
+name: Build OpenTune
+
+on:
+  push:
+    branches: [main, master, standalone]
+  pull_request:
+    branches: [main, master, standalone]
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+env:
+  # Version pins — bump these when updating deps
+  ONNXRUNTIME_VERSION: "1.24.4"
+  ARA_SDK_VERSION: "2.2.0"
+  DIRECTML_VERSION: "1.15.4"
+  D3D12_VERSION: "1.619.1"
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Windows Build (VS2022, x64)
+  # ──────────────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          submodules: recursive
+
+      # ── Setup ────────────────────────────────────────────────────────────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet (for DirectML & D3D12)
+        uses: nuget/setup-nuget@v2
+
+      # ── Cache ────────────────────────────────────────────────────────────
+      # Cache key is based on the runner OS and the version pins defined above.
+      # Invalidate cache by bumping any version env-var.
+      - name: Cache ThirdParty dependencies
+        id: cache-thirdparty
+        uses: actions/cache@v4
+        with:
+          path: |
+            JUCE-master
+            ThirdParty/ARA_SDK-releases-*
+            ThirdParty/onnxruntime-win-x64-*
+            ThirdParty/onnxruntime-dml-*
+            ThirdParty/microsoft.ai.directml.*
+            ThirdParty/microsoft.direct3d.d3d12.*
+          key: deps-windows-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ env.DIRECTML_VERSION }}-${{ env.D3D12_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
+
+      # ── Dependencies ─────────────────────────────────────────────────────
+      - name: Download JUCE Framework
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          if (-not (Test-Path "JUCE-master")) {
+            git clone --depth 1 https://github.com/juce-framework/JUCE.git JUCE-master
+          }
+
+      - name: Download ARA SDK
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $araDir = "ThirdParty/ARA_SDK-releases-$env:ARA_SDK_VERSION"
+          if (-not (Test-Path $araDir)) {
+            git clone --recursive --branch releases/$env:ARA_SDK_VERSION `
+              https://github.com/Celemony/ARA_SDK.git $araDir
+          }
+
+      # ONNX Runtime CPU (headers + .lib for linking)
+      - name: Download ONNX Runtime CPU
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $dir = "ThirdParty/onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION"
+          if (-not (Test-Path "$dir/include/onnxruntime_cxx_api.h")) {
+            $zip = "onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION.zip"
+            $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ONNXRUNTIME_VERSION/$zip"
+            Write-Host "Downloading ONNX Runtime CPU from $url"
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath ThirdParty/ -Force
+            Remove-Item $zip
+          }
+
+      # ONNX Runtime DirectML (runtime DLL + DML provider header)
+      - name: Download ONNX Runtime DirectML (NuGet)
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $dir = "ThirdParty/onnxruntime-dml-$env:ONNXRUNTIME_VERSION"
+          if (-not (Test-Path "$dir/runtimes/win-x64/native/onnxruntime.dll")) {
+            $nupkg = "Microsoft.ML.OnnxRuntime.DirectML.$env:ONNXRUNTIME_VERSION.nupkg"
+            $url = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$env:ONNXRUNTIME_VERSION"
+            Write-Host "Downloading ONNX Runtime DML from $url"
+            Invoke-WebRequest -Uri $url -OutFile "$nupkg.zip"
+            New-Item -ItemType Directory -Force -Path $dir
+            Expand-Archive -Path "$nupkg.zip" -DestinationPath $dir -Force
+            Remove-Item "$nupkg.zip"
+          }
+
+      # DirectML SDK (NuGet: Microsoft.AI.DirectML)
+      - name: Download DirectML SDK
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $dir = "ThirdParty/microsoft.ai.directml.$env:DIRECTML_VERSION"
+          if (-not (Test-Path "$dir/include/DirectML.h")) {
+            $url = "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$env:DIRECTML_VERSION"
+            Write-Host "Downloading DirectML SDK from $url"
+            Invoke-WebRequest -Uri $url -OutFile "$dir.zip"
+            New-Item -ItemType Directory -Force -Path $dir
+            Expand-Archive -Path "$dir.zip" -DestinationPath $dir -Force
+            Remove-Item "$dir.zip"
+          }
+
+      # D3D12 Agility SDK (NuGet: Microsoft.Direct3D.D3D12)
+      - name: Download D3D12 Agility SDK
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          $dir = "ThirdParty/microsoft.direct3d.d3d12.$env:D3D12_VERSION"
+          if (-not (Test-Path "$dir/build/native/include/d3d12.h")) {
+            $url = "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/$env:D3D12_VERSION"
+            Write-Host "Downloading D3D12 Agility SDK from $url"
+            Invoke-WebRequest -Uri $url -OutFile "$dir.zip"
+            New-Item -ItemType Directory -Force -Path $dir
+            Expand-Archive -Path "$dir.zip" -DestinationPath $dir -Force
+            Remove-Item "$dir.zip"
+          }
+
+      # ── Download AI Models (optional, for complete artifacts) ────────────
+      - name: Download AI models
+        continue-on-error: true
+        run: |
+          # Download models from the upstream release assets.
+          # If no release exists or download fails, the build still succeeds
+          # (models are copy-only, not compile-time deps).
+          $tag = "OpenTuneV1.5"
+          $repo = "YuFeng926/OpenTune"
+          $assetList = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag").assets
+
+          # Create model directories
+          New-Item -ItemType Directory -Force -Path models | Out-Null
+          New-Item -ItemType Directory -Force -Path pc_nsf_hifigan_44.1k_ONNX | Out-Null
+
+          foreach ($asset in $assetList) {
+            $name = $asset.name
+            $dlUrl = $asset.browser_download_url
+            Write-Host "Found asset: $name"
+
+            if ($name -like "*.onnx") {
+              Write-Host "Downloading model: $name"
+              Invoke-WebRequest -Uri $dlUrl -OutFile "models/$name"
+            }
+          }
+
+          # Also try to get hifigan model from assets
+          # If the models aren't in releases, they'll be missing — that's fine for CI
+          if (-not (Test-Path "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx")) {
+            Write-Host "Warning: hifigan model not found in release assets. Build will proceed without model files."
+          }
+
+      # ── Configure ────────────────────────────────────────────────────────
+      - name: Configure CMake (ARA)
+        # PATH workaround from the project's build docs, avoiding Path/PATH collision
+        run: |
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-ara-vs2022"
+
+      - name: Configure CMake (non-ARA)
+        run: |
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-nonara-vs2022"
+
+      # ── Build ────────────────────────────────────────────────────────────
+      - name: Build ARA VST3
+        run: |
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-ara-release --target OpenTune_VST3"
+
+      - name: Build ARA Standalone
+        run: |
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-ara-release --target OpenTune_Standalone"
+
+      - name: Build non-ARA VST3
+        run: |
+          cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-nonara-release --target OpenTune_VST3"
+
+      # ── Upload Artifacts ─────────────────────────────────────────────────
+      - name: Upload ARA build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTune-Windows-ARA
+          path: |
+            build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/
+          compression-level: 6
+
+      - name: Upload non-ARA build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTune-Windows-non-ARA
+          path: |
+            build-nonara-overlay-vs18-clean/OpenTune_artefacts/Release/
+          compression-level: 6
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # macOS Build (Apple Silicon arm64)
+  # ──────────────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    # Uncomment the next line to constrain to Apple Silicon runners
+    # runs-on: macos-15-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          submodules: recursive
+
+      - name: Install CMake
+        run: brew install cmake
+
+      # ── Cache ────────────────────────────────────────────────────────────
+      - name: Cache ThirdParty dependencies
+        id: cache-thirdparty
+        uses: actions/cache@v4
+        with:
+          path: |
+            JUCE-master
+            ThirdParty/ARA_SDK-releases-*
+            ThirdParty/onnxruntime-osx-arm64-*
+          key: deps-macos-${{ env.ONNXRUNTIME_VERSION }}-${{ env.ARA_SDK_VERSION }}-${{ hashFiles('cmake/OpenTuneJuceVST3ClientOverlay.cmake') }}
+
+      # ── Dependencies ─────────────────────────────────────────────────────
+      - name: Download JUCE Framework
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          if [ ! -d "JUCE-master" ]; then
+            git clone --depth 1 https://github.com/juce-framework/JUCE.git JUCE-master
+          fi
+
+      - name: Download ARA SDK
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          ARA_DIR="ThirdParty/ARA_SDK-releases-${ARA_SDK_VERSION}"
+          if [ ! -d "$ARA_DIR" ]; then
+            git clone --recursive --branch "releases/${ARA_SDK_VERSION}" \
+              https://github.com/Celemony/ARA_SDK.git "$ARA_DIR"
+          fi
+
+      - name: Download ONNX Runtime (macOS arm64)
+        if: steps.cache-thirdparty.outputs.cache-hit != 'true'
+        run: |
+          DIR="ThirdParty/onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}"
+          if [ ! -f "$DIR/include/onnxruntime_cxx_api.h" ]; then
+            TARBALL="onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz"
+            URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${TARBALL}"
+            echo "Downloading ONNX Runtime macOS from $URL"
+            curl -LO "$URL"
+            mkdir -p "$DIR"
+            tar xzf "$TARBALL" -C "$DIR" --strip-components=1
+            rm "$TARBALL"
+          fi
+
+      # ── Download AI Models ───────────────────────────────────────────────
+      - name: Download AI models
+        continue-on-error: true
+        shell: bash
+        run: |
+          TAG="OpenTuneV1.5"
+          REPO="YuFeng926/OpenTune"
+          ASSETS=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq '.assets')
+
+          mkdir -p models pc_nsf_hifigan_44.1k_ONNX
+
+          echo "$ASSETS" | jq -c '.[]' | while read -r asset; do
+            NAME=$(echo "$asset" | jq -r '.name')
+            DL_URL=$(echo "$asset" | jq -r '.browser_download_url')
+            echo "Found asset: $NAME"
+
+            if [[ "$NAME" == *.onnx ]]; then
+              echo "Downloading model: $NAME"
+              curl -Lo "models/$NAME" "$DL_URL"
+            fi
+          done
+
+          if [ ! -f "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx" ]; then
+            echo "Warning: hifigan model not found. Build will proceed without model files."
+          fi
+
+      # ── Configure & Build ────────────────────────────────────────────────
+      - name: Configure CMake
+        run: cmake -B build -G Xcode
+
+      - name: Build Release
+        run: cmake --build build --config Release
+
+      # ── Upload Artifacts ─────────────────────────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTune-macOS
+          path: |
+            build/OpenTune_artefacts/Release/
+          compression-level: 6
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Summary Job
+  # ──────────────────────────────────────────────────────────────────────────
+  ci-summary:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    if: always()
+    steps:
+      - name: Summarize build results
+        run: |
+          echo "## OpenTune CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows (ARA) | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows (non-ARA) | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS | ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: needs.build-windows.result == 'failure' || needs.build-macos.result == 'failure'
+        run: |
+          echo "::warning::One or more build jobs failed. Check the workflow logs for details."
