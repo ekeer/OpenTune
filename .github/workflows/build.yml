@@ -1,19 +1,25 @@
 # ============================================================================
-# OpenTune CI Build Workflow
+# OpenTune CI Build & Release Workflow
 # ============================================================================
 # Builds OpenTune on Windows (VS2022 x64) and macOS (Apple Silicon arm64).
-# Handles all third-party dependencies with caching for fast rebuilds.
+# On version tags (v*), also creates a GitHub Release with packaged downloads.
 # ============================================================================
 
-name: Build OpenTune
+name: Build & Release OpenTune
 
 on:
   push:
     branches: [main, master, standalone]
+    tags: ["v*"]
   pull_request:
     branches: [main, master, standalone]
-  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a release after building"
+        type: boolean
+        default: false
+        required: false
 
 env:
   # Version pins — bump these when updating deps
@@ -31,6 +37,8 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -39,16 +47,30 @@ jobs:
           lfs: true
           submodules: recursive
 
+      # ── Extract version ──────────────────────────────────────────────────
+      - name: Get version
+        id: get-version
+        shell: pwsh
+        run: |
+          # Prefer tag; fall back to CMakeLists.txt project version
+          if ("$env:GITHUB_REF" -match "^refs/tags/v(.+)$") {
+            $ver = $matches[1]
+          } else {
+            $cmake = Get-Content CMakeLists.txt
+            if ($cmake -match 'project\(OpenTune VERSION ([0-9.]+)') {
+              $ver = $matches[1]
+            } else {
+              $ver = "0.0.0"
+            }
+          }
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+          echo "Building OpenTune v$ver"
+
       # ── Setup ────────────────────────────────────────────────────────────
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Setup NuGet (for DirectML & D3D12)
-        uses: nuget/setup-nuget@v2
-
       # ── Cache ────────────────────────────────────────────────────────────
-      # Cache key is based on the runner OS and the version pins defined above.
-      # Invalidate cache by bumping any version env-var.
       - name: Cache ThirdParty dependencies
         id: cache-thirdparty
         uses: actions/cache@v4
@@ -79,7 +101,6 @@ jobs:
               https://github.com/Celemony/ARA_SDK.git $araDir
           }
 
-      # ONNX Runtime CPU (headers + .lib for linking)
       - name: Download ONNX Runtime CPU
         if: steps.cache-thirdparty.outputs.cache-hit != 'true'
         run: |
@@ -93,7 +114,6 @@ jobs:
             Remove-Item $zip
           }
 
-      # ONNX Runtime DirectML (runtime DLL + DML provider header)
       - name: Download ONNX Runtime DirectML (NuGet)
         if: steps.cache-thirdparty.outputs.cache-hit != 'true'
         run: |
@@ -108,69 +128,55 @@ jobs:
             Remove-Item "$nupkg.zip"
           }
 
-      # DirectML SDK (NuGet: Microsoft.AI.DirectML)
       - name: Download DirectML SDK
         if: steps.cache-thirdparty.outputs.cache-hit != 'true'
         run: |
           $dir = "ThirdParty/microsoft.ai.directml.$env:DIRECTML_VERSION"
           if (-not (Test-Path "$dir/include/DirectML.h")) {
             $url = "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$env:DIRECTML_VERSION"
-            Write-Host "Downloading DirectML SDK from $url"
             Invoke-WebRequest -Uri $url -OutFile "$dir.zip"
             New-Item -ItemType Directory -Force -Path $dir
             Expand-Archive -Path "$dir.zip" -DestinationPath $dir -Force
             Remove-Item "$dir.zip"
           }
 
-      # D3D12 Agility SDK (NuGet: Microsoft.Direct3D.D3D12)
       - name: Download D3D12 Agility SDK
         if: steps.cache-thirdparty.outputs.cache-hit != 'true'
         run: |
           $dir = "ThirdParty/microsoft.direct3d.d3d12.$env:D3D12_VERSION"
           if (-not (Test-Path "$dir/build/native/include/d3d12.h")) {
             $url = "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/$env:D3D12_VERSION"
-            Write-Host "Downloading D3D12 Agility SDK from $url"
             Invoke-WebRequest -Uri $url -OutFile "$dir.zip"
             New-Item -ItemType Directory -Force -Path $dir
             Expand-Archive -Path "$dir.zip" -DestinationPath $dir -Force
             Remove-Item "$dir.zip"
           }
 
-      # ── Download AI Models (optional, for complete artifacts) ────────────
+      # ── Download AI Models ───────────────────────────────────────────────
       - name: Download AI models
         continue-on-error: true
         run: |
-          # Download models from the upstream release assets.
-          # If no release exists or download fails, the build still succeeds
-          # (models are copy-only, not compile-time deps).
-          $tag = "OpenTuneV1.5"
-          $repo = "YuFeng926/OpenTune"
-          $assetList = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag").assets
-
-          # Create model directories
           New-Item -ItemType Directory -Force -Path models | Out-Null
           New-Item -ItemType Directory -Force -Path pc_nsf_hifigan_44.1k_ONNX | Out-Null
 
-          foreach ($asset in $assetList) {
-            $name = $asset.name
-            $dlUrl = $asset.browser_download_url
-            Write-Host "Found asset: $name"
-
-            if ($name -like "*.onnx") {
-              Write-Host "Downloading model: $name"
-              Invoke-WebRequest -Uri $dlUrl -OutFile "models/$name"
+          # Try upstream release
+          try {
+            $upstream = "YuFeng926/OpenTune"
+            $releases = Invoke-RestMethod "https://api.github.com/repos/$upstream/releases?per_page=5"
+            $tag = $releases[0].tag_name
+            $assetList = (Invoke-RestMethod "https://api.github.com/repos/$upstream/releases/tags/$tag").assets
+            foreach ($asset in $assetList) {
+              if ($asset.name -like "*.onnx") {
+                Write-Host "Downloading model: $($asset.name)"
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "models/$($asset.name)"
+              }
             }
-          }
-
-          # Also try to get hifigan model from assets
-          # If the models aren't in releases, they'll be missing — that's fine for CI
-          if (-not (Test-Path "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx")) {
-            Write-Host "Warning: hifigan model not found in release assets. Build will proceed without model files."
+          } catch {
+            Write-Host "Could not fetch models from upstream. Build will proceed without model files."
           }
 
       # ── Configure ────────────────────────────────────────────────────────
       - name: Configure CMake (ARA)
-        # PATH workaround from the project's build docs, avoiding Path/PATH collision
         run: |
           cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --preset windows-ara-vs2022"
 
@@ -191,30 +197,56 @@ jobs:
         run: |
           cmd /v:on /c "set CLEAN_PATH=%Path%& set PATH=& set Path=!CLEAN_PATH!& cmake --build --preset windows-nonara-release --target OpenTune_VST3"
 
+      # ── Package for Release ──────────────────────────────────────────────
+      - name: Package Windows release artifacts
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.get-version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist
+
+          # ARA Standalone
+          Compress-Archive -Path "build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/Standalone/*" `
+            -DestinationPath "dist/OpenTune-$ver-Windows-ARA-Standalone.zip" -Force
+
+          # ARA VST3
+          if (Test-Path "build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3") {
+            Compress-Archive -Path "build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/*" `
+              -DestinationPath "dist/OpenTune-$ver-Windows-ARA-VST3.zip" -Force
+          }
+
+          # non-ARA VST3
+          if (Test-Path "build-nonara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3") {
+            Compress-Archive -Path "build-nonara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/*" `
+              -DestinationPath "dist/OpenTune-$ver-Windows-non-ARA-VST3.zip" -Force
+          }
+
+          Write-Host "Packaged release artifacts:"
+          Get-ChildItem dist/ | Select-Object Name, Length
+
       # ── Upload Artifacts ─────────────────────────────────────────────────
-      - name: Upload ARA build artifacts
+      - name: Upload debug artifacts (CI only)
         uses: actions/upload-artifact@v4
         with:
-          name: OpenTune-Windows-ARA
+          name: OpenTune-Windows
           path: |
             build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/
-          compression-level: 6
-
-      - name: Upload non-ARA build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenTune-Windows-non-ARA
-          path: |
             build-nonara-overlay-vs18-clean/OpenTune_artefacts/Release/
           compression-level: 6
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTune-Windows-Packages
+          path: dist/*.zip
+          compression-level: 0
 
   # ──────────────────────────────────────────────────────────────────────────
   # macOS Build (Apple Silicon arm64)
   # ──────────────────────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
-    # Uncomment the next line to constrain to Apple Silicon runners
-    # runs-on: macos-15-arm64
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -222,6 +254,19 @@ jobs:
         with:
           lfs: true
           submodules: recursive
+
+      # ── Extract version ──────────────────────────────────────────────────
+      - name: Get version
+        id: get-version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" =~ ^refs/tags/v(.+)$ ]]; then
+            ver="${BASH_REMATCH[1]}"
+          else
+            ver=$(grep -oP 'project\(OpenTune VERSION \K[0-9.]+' CMakeLists.txt || echo "0.0.0")
+          fi
+          echo "version=$ver" >> $GITHUB_OUTPUT
+          echo "Building OpenTune v$ver"
 
       - name: Install CMake
         run: brew install cmake
@@ -273,25 +318,22 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          TAG="OpenTuneV1.5"
-          REPO="YuFeng926/OpenTune"
-          ASSETS=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq '.assets')
-
           mkdir -p models pc_nsf_hifigan_44.1k_ONNX
-
-          echo "$ASSETS" | jq -c '.[]' | while read -r asset; do
-            NAME=$(echo "$asset" | jq -r '.name')
-            DL_URL=$(echo "$asset" | jq -r '.browser_download_url')
-            echo "Found asset: $NAME"
-
-            if [[ "$NAME" == *.onnx ]]; then
-              echo "Downloading model: $NAME"
-              curl -Lo "models/$NAME" "$DL_URL"
-            fi
-          done
-
-          if [ ! -f "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx" ]; then
-            echo "Warning: hifigan model not found. Build will proceed without model files."
+          UPSTREAM="YuFeng926/OpenTune"
+          RELEASES=$(curl -s "https://api.github.com/repos/$UPSTREAM/releases?per_page=5")
+          TAG=$(echo "$RELEASES" | jq -r '.[0].tag_name // empty')
+          if [ -n "$TAG" ]; then
+            ASSETS=$(curl -s "https://api.github.com/repos/$UPSTREAM/releases/tags/$TAG" | jq '.assets')
+            echo "$ASSETS" | jq -c '.[]' | while read -r asset; do
+              NAME=$(echo "$asset" | jq -r '.name')
+              DL_URL=$(echo "$asset" | jq -r '.browser_download_url')
+              if [[ "$NAME" == *.onnx ]]; then
+                echo "Downloading model: $NAME"
+                curl -Lo "models/$NAME" "$DL_URL"
+              fi
+            done
+          else
+            echo "No upstream releases found. Models need to be provided manually."
           fi
 
       # ── Configure & Build ────────────────────────────────────────────────
@@ -301,14 +343,114 @@ jobs:
       - name: Build Release
         run: cmake --build build --config Release
 
+      # ── Package for Release ──────────────────────────────────────────────
+      - name: Package macOS release artifacts
+        shell: bash
+        run: |
+          VER="${{ steps.get-version.outputs.version }}"
+          mkdir -p dist
+
+          # Package Standalone app
+          if [ -d "build/OpenTune_artefacts/Release/Standalone/OpenTune.app" ]; then
+            ditto -c -k --keepParent "build/OpenTune_artefacts/Release/Standalone/OpenTune.app" \
+              "dist/OpenTune-$ver-macOS-Standalone.zip"
+          fi
+
+          # Package VST3
+          if [ -d "build/OpenTune_artefacts/Release/VST3/OpenTune.vst3" ]; then
+            ditto -c -k --keepParent "build/OpenTune_artefacts/Release/VST3/OpenTune.vst3" \
+              "dist/OpenTune-$ver-macOS-VST3.zip"
+          fi
+
+          echo "Packaged release artifacts:"
+          ls -lh dist/
+
       # ── Upload Artifacts ─────────────────────────────────────────────────
-      - name: Upload build artifacts
+      - name: Upload debug artifacts (CI only)
         uses: actions/upload-artifact@v4
         with:
           name: OpenTune-macOS
           path: |
             build/OpenTune_artefacts/Release/
           compression-level: 6
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTune-macOS-Packages
+          path: dist/*.zip
+          compression-level: 0
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Release Job — creates GitHub Release and uploads packaged artifacts
+  # ──────────────────────────────────────────────────────────────────────────
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+    permissions:
+      contents: write
+
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" =~ ^refs/tags/v(.+)$ ]]; then
+            ver="${BASH_REMATCH[1]}"
+          else
+            ver="${{ needs.build-windows.outputs.version }}"
+          fi
+          echo "version=$ver" >> $GITHUB_OUTPUT
+          echo "Releasing OpenTune v$ver"
+
+      - name: Download Windows packages
+        uses: actions/download-artifact@v4
+        with:
+          name: OpenTune-Windows-Packages
+          path: release-packages/
+
+      - name: Download macOS packages
+        uses: actions/download-artifact@v4
+        with:
+          name: OpenTune-macOS-Packages
+          path: release-packages/
+
+      - name: List release packages
+        run: ls -lh release-packages/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: OpenTune v${{ steps.version.outputs.version }}
+          body: |
+            ## OpenTune v${{ steps.version.outputs.version }}
+
+            ### 下载
+
+            | 平台 | 格式 | 文件 |
+            |------|------|------|
+            | Windows (ARA) | Standalone | `OpenTune-${{ steps.version.outputs.version }}-Windows-ARA-Standalone.zip` |
+            | Windows (ARA) | VST3 | `OpenTune-${{ steps.version.outputs.version }}-Windows-ARA-VST3.zip` |
+            | Windows (non-ARA) | VST3 | `OpenTune-${{ steps.version.outputs.version }}-Windows-non-ARA-VST3.zip` |
+            | macOS (arm64) | Standalone | `OpenTune-${{ steps.version.outputs.version }}-macOS-Standalone.zip` |
+            | macOS (arm64) | VST3 | `OpenTune-${{ steps.version.outputs.version }}-macOS-VST3.zip` |
+
+            ### 使用说明
+
+            **Windows**: 解压后运行 `OpenTune.exe`，保持 `models/` 目录和 DLL 文件在同目录。
+            将 `OpenTune.vst3` 文件夹复制到 `C:\Program Files\Common Files\VST3\` 即可在 DAW 中加载。
+
+            **macOS**: 解压后运行 `OpenTune.app`。将 `OpenTune.vst3` 复制到 `/Library/Audio/Plug-Ins/VST3/`。
+
+            > ⚠️ AI 模型文件（onnx）需要单独下载并放入 `models/` 目录。
+            > 模型下载地址：[上游 Release](https://github.com/YuFeng926/OpenTune/releases)
+          files: release-packages/*
+          draft: false
+          prerelease: false
+          generate_release_notes: false
 
   # ──────────────────────────────────────────────────────────────────────────
   # Summary Job
@@ -322,11 +464,10 @@ jobs:
         run: |
           echo "## OpenTune CI Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Windows (ARA) | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Windows (non-ARA) | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS | ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows Build | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS Build | ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify on failure
         if: needs.build-windows.result == 'failure' || needs.build-macos.result == 'failure'
