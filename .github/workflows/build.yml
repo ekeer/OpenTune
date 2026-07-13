@@ -165,22 +165,22 @@ jobs:
             $url = "https://www.surina.net/soundtouch/soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
             Write-Host "Downloading SoundTouch from $url"
             $tarball = "soundtouch-$env:SOUNDTOUCH_VERSION.tar.gz"
-            # Use curl.exe with retry (more reliable than Invoke-WebRequest on Windows)
-            curl.exe -sSL --connect-timeout 30 --retry 3 $url -o $tarball
-            if (-not (Test-Path $tarball)) {
-              # Fallback: try GitHub mirror
-              Write-Host "Retrying via GitHub mirror..."
-              $url = "https://github.com/olegantonyan/soundtouch/archive/refs/tags/v$env:SOUNDTOUCH_VERSION.tar.gz"
-              curl.exe -sSL --connect-timeout 30 --retry 3 $url -o $tarball
+            # Try curl first
+            curl.exe -sSL --connect-timeout 30 --retry 2 $url -o $tarball 2>$null
+            if (-not (Test-Path $tarball) -or ((Get-Item $tarball).Length -eq 0)) {
+              # Fallback: git clone (small repo, reliable on GitHub runners)
+              Write-Host "curl failed, cloning from GitHub..."
+              git clone --depth 1 --branch $env:SOUNDTOUCH_VERSION https://github.com/olegantonyan/soundtouch.git "$dir"
+            } else {
+              tar xzf $tarball -C ThirdParty/
+              # Tarball extracts to "soundtouch/" — rename to match CMakeLists.txt expectation
+              if (Test-Path "ThirdParty/soundtouch") {
+                Remove-Item -Recurse -Force "ThirdParty/soundtouch-$env:SOUNDTOUCH_VERSION" -ErrorAction SilentlyContinue
+                Rename-Item -Path "ThirdParty/soundtouch" -NewName "soundtouch-$env:SOUNDTOUCH_VERSION"
+              }
+              Remove-Item $tarball
             }
-            tar xzf $tarball -C ThirdParty/
-            # Tarball extracts to "soundtouch/" — rename to match CMakeLists.txt expectation
-            if (Test-Path "ThirdParty/soundtouch") {
-              Remove-Item -Recurse -Force "ThirdParty/soundtouch-$env:SOUNDTOUCH_VERSION" -ErrorAction SilentlyContinue
-              Rename-Item -Path "ThirdParty/soundtouch" -NewName "soundtouch-$env:SOUNDTOUCH_VERSION"
-            }
-            Remove-Item $tarball
-            Write-Host "SoundTouch extracted to $dir"
+            Write-Host "SoundTouch ready at $dir"
           }
 
       # ── Download AI Models (optional) ────────────────────────────────────
@@ -204,6 +204,26 @@ jobs:
             }
           } catch {
             Write-Host "Could not fetch models from upstream. Build will proceed without model files."
+          }
+
+      # ── Create Missing Model Placeholders ────────────────────────────────
+      # CMake post-build steps copy model files; if they don't exist, the
+      # build fails. Create empty placeholders for any missing model files.
+      - name: Create model placeholders
+        run: |
+          $models = @(
+            "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx",
+            "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44k_hop512_128bin_opentune_fmax22050_v4_user_zh_female_step20000.onnx",
+            "models/rmvpe.onnx"
+          )
+          foreach ($m in $models) {
+            if (-not (Test-Path $m)) {
+              $parent = Split-Path $m
+              New-Item -ItemType Directory -Force -Path $parent | Out-Null
+              # 1-byte placeholder so copy_if_different succeeds
+              Set-Content -Path $m -Value ([byte]0) -AsByteStream
+              Write-Host "Created placeholder: $m"
+            }
           }
 
       # ── Configure ────────────────────────────────────────────────────────
@@ -394,6 +414,24 @@ jobs:
           else
             echo "No upstream releases found. Models need to be provided manually."
           fi
+
+      # ── Create Missing Model Placeholders ────────────────────────────────
+      # CMake post-build steps copy model files; create empty placeholders
+      # for any missing ones so the build doesn't fail.
+      - name: Create model placeholders
+        shell: bash
+        run: |
+          for f in \
+            "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx" \
+            "pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44k_hop512_128bin_opentune_fmax22050_v4_user_zh_female_step20000.onnx" \
+            "models/rmvpe.onnx"
+          do
+            if [ ! -f "$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              touch "$f"
+              echo "Created placeholder: $f"
+            fi
+          done
 
       # ── Configure & Build ────────────────────────────────────────────────
       - name: Configure CMake
